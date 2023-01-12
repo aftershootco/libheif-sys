@@ -1,0 +1,4 @@
+[submodule "vendor"]
+	path = vendor
+	url = https://github.com/strukturag/libheif
+	branch = v1.14.2
