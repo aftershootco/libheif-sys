@@ -178,6 +178,11 @@ fn find_libheif() -> Vec<String> {
 
 #[cfg(all(target_os = "windows", target_env = "msvc"))]
 fn install_libheif_by_vcpkg() {
+    if let Err(err) = setup_vcpkg_env_from_lib_resolver() {
+        println!("cargo:warning={err}");
+        std::process::exit(1);
+    }
+
     let vcpkg_lib = vcpkg::Config::new()
         .emit_includes(true)
         .find_package("libheif");
@@ -189,6 +194,110 @@ fn install_libheif_by_vcpkg() {
     // system-library dependencies. Since x265 uses registry functions from Advapi32,
     // your Rust crate must explicitly tell Cargo to link that Windows system library.
     println!("cargo:rustc-link-lib=advapi32");
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn setup_vcpkg_env_from_lib_resolver() -> Result<(), String> {
+    let workspace = std::env::var_os("CARGO_WORKSPACE_DIR").map(PathBuf::from);
+    let vcpkg_root = std::env::var_os("VCPKG_ROOT").map(PathBuf::from);
+    if let Some(root) = &vcpkg_root {
+        let Some(workspace) = &workspace else {
+            return Ok(());
+        };
+        let root = if root.is_absolute() {
+            root.clone()
+        } else {
+            workspace.join(root)
+        };
+        if !same_path(&root, &workspace.join(".vcpkg")) {
+            return Ok(());
+        }
+    }
+
+    let resolved = lib_resolver::Resolver::new("libheif")
+        .vcpkg("libheif")
+        .order(&[lib_resolver::Strategy::Vcpkg])
+        .no_metadata()
+        .probe();
+    let lib = match resolved {
+        Ok(lib) => lib,
+        Err(err) => {
+            println!("cargo:warning=lib-resolver could not locate libheif; trying the configured vcpkg installation: {err}");
+            return Ok(());
+        }
+    };
+    let Some(installed) = lib.vcpkg_installed() else {
+        println!("cargo:warning=lib-resolver did not use vcpkg for libheif; trying the configured vcpkg installation");
+        return Ok(());
+    };
+    let triplet = installed
+        .file_name()
+        .ok_or_else(|| format!("invalid vcpkg install path: {}", installed.display()))?;
+    let installed_root = installed
+        .parent()
+        .ok_or_else(|| format!("invalid vcpkg install path: {}", installed.display()))?;
+    let target_dir = installed_root
+        .parent()
+        .ok_or_else(|| format!("invalid vcpkg install path: {}", installed.display()))?;
+    let vcpkg_root = match (vcpkg_root, workspace) {
+        (Some(root), Some(workspace)) if root.is_relative() => workspace.join(root),
+        (Some(root), _) => root,
+        (None, _) => target_dir.join(".vcpkg"),
+    };
+    if !vcpkg_root.join("scripts/buildsystems/vcpkg.cmake").exists() {
+        return Err(format!(
+            "could not find the vcpkg checkout at {}",
+            vcpkg_root.display()
+        ));
+    }
+
+    link_vcpkg_installed(installed_root, &vcpkg_root.join("installed"))?;
+    std::env::set_var("VCPKG_ROOT", vcpkg_root.as_os_str());
+    std::env::set_var("VCPKGRS_TRIPLET", triplet);
+    Ok(())
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+#[cfg(all(target_os = "windows", target_env = "msvc"))]
+fn link_vcpkg_installed(target: &Path, link: &Path) -> Result<(), String> {
+    let target = std::fs::canonicalize(target)
+        .map_err(|err| format!("failed to resolve {}: {err}", target.display()))?;
+    match std::fs::canonicalize(link) {
+        Ok(existing) if existing == target => return Ok(()),
+        Ok(_) => {
+            return Err(format!(
+                "{} already exists and does not point to {}",
+                link.display(),
+                target.display()
+            ));
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to inspect {}: {err}", link.display())),
+    }
+
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(&target)
+        .status()
+        .map_err(|err| format!("failed to create junction {}: {err}", link.display()))?;
+    if !status.success() {
+        if std::fs::canonicalize(link).ok().as_deref() == Some(target.as_path()) {
+            return Ok(());
+        }
+        return Err(format!(
+            "failed to create junction {} -> {}",
+            link.display(),
+            target.display()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "use-bindgen")]

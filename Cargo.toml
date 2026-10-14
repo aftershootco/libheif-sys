@@ -63,6 +63,10 @@ cmake = { version = "0.1.58", optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
 vcpkg = "0.2.15"
+lib-resolver = {
+    git = "ssh://git@github.com/aftershootco/lib-resolver.git",
+    rev = "ceb8c230be9f3a6bc0957c11aee64712119db471",
+}
 walkdir = "2.5"
 
 
